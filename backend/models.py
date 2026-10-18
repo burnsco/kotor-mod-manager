@@ -23,6 +23,7 @@ class SettingsModel(BaseModel):
     custom_patcher_path: str = ""
     nexus_api_key: str = ""
     preferred_resolution: str = ""    # e.g. 1920x1080; empty = detect the screen
+    browser_download_mode: Optional[bool] = None
 
 
 class StartInstallRequest(BaseModel):

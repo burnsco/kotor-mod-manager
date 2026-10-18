@@ -11,7 +11,7 @@ import { Switch } from "@/components/ui/switch";
 import { useLanguage, LOCALES, type Locale } from "@/lib/i18n";
 import { isUiSoundEnabled, setUiSoundEnabled, playClick } from "@/lib/sound";
 
-const EMPTY: Settings = { kotor1_path: "", kotor2_path: "", download_dir: "", language: "en", custom_patcher_path: "", nexus_api_key: "", preferred_resolution: "" };
+const EMPTY: Settings = { kotor1_path: "", kotor2_path: "", download_dir: "", language: "en", custom_patcher_path: "", nexus_api_key: "", preferred_resolution: "", browser_download_mode: true };
 
 interface GeneralSectionProps {
   addLog: (message: string, tag?: string) => void;
@@ -85,7 +85,12 @@ export function GeneralSection({ addLog }: GeneralSectionProps) {
     try {
       // Other tabs may have saved credentials or a patcher path since we opened.
       const latest = await api.getSettings();
-      await api.setSettings({ ...latest, download_dir: s.download_dir, language: locale });
+      await api.setSettings({
+        ...latest,
+        download_dir: s.download_dir,
+        language: locale,
+        browser_download_mode: s.browser_download_mode ?? true,
+      });
       setSaved(true);
       addLog("Settings saved.", "success");
     } catch (e: any) {
@@ -157,6 +162,22 @@ export function GeneralSection({ addLog }: GeneralSectionProps) {
               onChange={(e) => { setSaved(false); setS({ ...s, preferred_resolution: e.target.value.trim() }); }}
             />
             <p className="text-xs text-muted-foreground">{t("settings.general.screenSizeHint")}</p>
+          </div>
+          <div className="flex items-center justify-between gap-4 pt-2 border-t">
+            <div className="space-y-0.5">
+              <Label htmlFor="browser-dl">Download via web browser</Label>
+              <p className="text-xs text-muted-foreground">
+                Opens mod pages in your browser (Firefox, Edge, etc.) and watches your Downloads folder. Avoids login and API permission issues with DeadlyStream and Nexus Mods.
+              </p>
+            </div>
+            <Switch
+              id="browser-dl"
+              checked={s.browser_download_mode ?? true}
+              onCheckedChange={(checked) => {
+                setSaved(false);
+                setS({ ...s, browser_download_mode: checked });
+              }}
+            />
           </div>
           <div className="flex items-center gap-3">
             <Button onClick={save} disabled={saving}>

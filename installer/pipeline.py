@@ -46,6 +46,17 @@ def _dedupe_keep_order(seq: list) -> list:
     return out
 
 
+def _resolution_in_name(name: str) -> "tuple[int, int] | None":
+    match = re.search(r"(\d{3,4})\s*[x×]\s*(\d{3,4})", name or "", re.I)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    token = re.search(r"\b(1080p|1440p|2160p|2k|4k)\b", name or "", re.I)
+    return {
+        "1080p": (1920, 1080), "1440p": (2560, 1440),
+        "2k": (2560, 1440), "2160p": (3840, 2160), "4k": (3840, 2160),
+    }.get(token.group(1).lower()) if token else None
+
+
 class ModStatus(Enum):
     PENDING          = "Pending"
     DOWNLOADING      = "Downloading"
@@ -154,6 +165,7 @@ class Pipeline:
         record_to_library: bool = True,
         language: str = "en",
         screen_resolution: str = "1920x1080",
+        browser_download_mode: Optional[bool] = None,
     ):
         self._mods = [PipelineMod(m) for m in mods]
         self._game_path = game_path
@@ -185,6 +197,9 @@ class Pipeline:
         # Used for the widescreen patches, and shown to the player when a mod
         # ships per-resolution packs and they are asked which one to get.
         self._screen_resolution = screen_resolution
+
+        self._browser_download_mode = bool(browser_download_mode)
+        self._browser_download_lock = threading.Lock()
 
         self._stop_event = threading.Event()
         # Free Nexus accounts: the clicks are collected ahead of the downloads.
@@ -311,7 +326,8 @@ class Pipeline:
         pending = [pm for pm in self._mods if pm.status not in (ModStatus.DONE, ModStatus.SKIPPED)]
         self._resolve_skip_constraints()
         self._check_dependencies()
-        self._start_click_queue(pending)
+        if not self._browser_download_mode:
+            self._start_click_queue(pending)
         try:
             with ThreadPoolExecutor(max_workers=_DOWNLOAD_WORKERS, thread_name_prefix="mod-dl") as pool:
                 futures: dict = {}   # Future -> PipelineMod, until its install turn
@@ -333,7 +349,11 @@ class Pipeline:
                         i = 0
                         while i < len(queue) and not self._stop_event.is_set():
                             host = _download_host(queue[i])
-                            if active.get(host, 0) >= _HOST_LIMITS.get(host, _DEFAULT_HOST_LIMIT):
+                            limit = (
+                                1 if (self._browser_download_mode and host in ("deadlystream", "nexus"))
+                                else _HOST_LIMITS.get(host, _DEFAULT_HOST_LIMIT)
+                            )
+                            if active.get(host, 0) >= limit:
                                 i += 1
                                 continue
                             active[host] = active.get(host, 0) + 1
@@ -545,12 +565,32 @@ class Pipeline:
         mod = pm.build_mod
         return self._download_dir / download_folder_name(mod.file_id, mod.slug)
 
+    def _archive_matches_screen_resolution(self, path: Path) -> bool:
+        """Reject a cached/browser archive explicitly tagged for another size."""
+        found = _resolution_in_name(path.name)
+        if not found:
+            return True  # Most mods are not resolution-specific.
+        wanted = re.search(r"(\d{3,4})\s*[x×]\s*(\d{3,4})", self._screen_resolution, re.I)
+        if not wanted:
+            return True
+        return found == (int(wanted.group(1)), int(wanted.group(2)))
+
     def _cached_for(self, pm: PipelineMod, dest_dir: Path) -> list:
         """Complete archives already on disk for this mod, or []."""
         if not dest_dir.exists():
             return []
         self._migrate_encoded_cache_names(dest_dir)
         cached = self._cached_archives(dest_dir)
+        # A previous install may have cached a huge movie/menu pack for another
+        # display size. Keep unrelated files, but make the selected variant
+        # download again when the cache has no matching resolution.
+        if cached:
+            tagged = [p for p in cached if _resolution_in_name(p.name)]
+            if tagged:
+                matching = [p for p in tagged if self._archive_matches_screen_resolution(p)]
+                if not matching:
+                    return []
+                cached = matching + [p for p in cached if p not in tagged]
         # An interrupted download leaves some of a mod's files and no record of a
         # finished one. If the guide names the exact file it wants and that file is
         # not among them, these are leftovers, not the mod: download it properly.
@@ -637,16 +677,75 @@ class Pipeline:
         # for the mods ahead of it. Say so rather than still "Downloading".
         self._set_status(pm, ModStatus.READY, "Downloaded, waiting for earlier mods")
 
-    # Files the player adds by hand --------------------------------------------
+    # Files the player adds by hand or downloads via browser -------------------
 
     @staticmethod
-    def _name_score(filename: str, name: str) -> int:
-        words = {w for w in re.split(r"[^a-z0-9]+", name.lower()) if len(w) > 2}
-        return sum(1 for w in words if w in filename.lower())
+    def _get_xdg_downloads_dir() -> "Path | None":
+        user_dirs = Path.home() / ".config" / "user-dirs.dirs"
+        if not user_dirs.is_file():
+            return None
+        try:
+            for line in user_dirs.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line.startswith("XDG_DOWNLOAD_DIR"):
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        val = parts[1].strip().strip('"').replace("$HOME", str(Path.home()))
+                        p = Path(val)
+                        if p.is_dir():
+                            return p
+        except Exception:
+            pass
+        return None
 
-    def _dropped_archive(self, pm: PipelineMod, dest_dir: Path, seen: dict) -> "list[Path] | None":
+    def _candidate_download_dirs(self) -> list:
+        dirs = []
+        if self._download_dir:
+            dirs.append(self._download_dir)
+        is_test_dir = (
+            str(self._download_dir).startswith(("/tmp", "/var/tmp"))
+            or "pytest" in str(self._download_dir)
+        )
+        if not is_test_dir:
+            xdg = self._get_xdg_downloads_dir()
+            if xdg and xdg.is_dir() and xdg not in dirs:
+                dirs.append(xdg)
+            home_dl = Path.home() / "Downloads"
+            if home_dl not in dirs and home_dl.is_dir():
+                dirs.append(home_dl)
+        return dirs
+
+    @staticmethod
+    def _name_score(filename: str, name: str, slug: str = "",
+                    directives=None, file_id: str = "") -> int:
+        filename_lower = filename.lower()
+        score = 0
+
+        # Check name words
+        if name:
+            words = {w for w in re.split(r"[^a-z0-9]+", name.lower()) if len(w) > 2}
+            score += sum(1 for w in words if w in filename_lower)
+        if slug:
+            slug_words = {w for w in re.split(r"[^a-z0-9]+", slug.lower()) if len(w) > 2}
+            score += sum(1 for w in slug_words if w in filename_lower)
+
+        # Check directives download_only
+        if directives and getattr(directives, "download_only", None):
+            for target in directives.download_only:
+                target_lower = target.lower()
+                if target_lower == filename_lower or target_lower in filename_lower:
+                    score += 50
+                else:
+                    target_words = {w for w in re.split(r"[^a-z0-9]+", target_lower) if len(w) > 2}
+                    score += sum(10 for w in target_words if w in filename_lower)
+
+        return score
+
+    def _dropped_archive(self, pm: PipelineMod, dest_dir: Path, seen: dict,
+                         started_at: float = 0) -> "list[Path] | None":
         """An archive the player put in this mod's folder, or loose in the mod
-        folder root. Only finished files count: one must stop growing first."""
+        folder root or browser Downloads folder. Only finished files count: one must
+        stop growing first."""
         def settled(p: Path) -> bool:
             try:
                 size = p.stat().st_size
@@ -657,44 +756,147 @@ class Pipeline:
             if size != last:
                 since = now
             seen[p] = (size, since)
+            if (p.parent / f"{p.name}.part").exists() or (p.parent / f"{p.name}.crdownload").exists():
+                return False
             return size > 0 and now - since >= _DROP_SETTLE_SECONDS
 
         cached = self._cached_for(pm, dest_dir)
         if cached and all(settled(f) for f in cached):
             return cached
-        try:
-            loose = [p for p in self._download_dir.iterdir()
-                     if p.is_file() and not p.name.startswith(".")
-                     and p.suffix.lower() in _DROP_ARCHIVES]
-        except OSError:
-            return None
+
+        loose = []
+        for d in self._candidate_download_dirs():
+            try:
+                if not d.is_dir():
+                    continue
+                for p in d.iterdir():
+                    if (p.is_file() and not p.name.startswith(".")
+                            and p.suffix.lower() in _DROP_ARCHIVES):
+                        if (p.parent / f"{p.name}.part").exists() or (p.parent / f"{p.name}.crdownload").exists():
+                            continue
+                        if started_at and p.stat().st_mtime < started_at - 2:
+                            continue
+                        if not self._archive_matches_screen_resolution(p):
+                            continue
+                        loose.append(p)
+            except OSError:
+                continue
+
         ready = [p for p in loose if settled(p)]
         if not ready:
             return None
-        # Take only a file named like this mod. Taking a lone unrelated file
-        # handed one mod's archive to whichever manual mod happened to wait first.
-        ready.sort(key=lambda p: self._name_score(p.name, pm.build_mod.name), reverse=True)
-        if self._name_score(ready[0].name, pm.build_mod.name) == 0:
+
+        # Take the best matching file named like this mod
+        mod = pm.build_mod
+        ready.sort(key=lambda p: self._name_score(
+            p.name, mod.name, slug=mod.slug,
+            directives=mod.directives, file_id=mod.file_id), reverse=True)
+
+        best = ready[0]
+        if self._name_score(best.name, mod.name, slug=mod.slug,
+                            directives=mod.directives, file_id=mod.file_id) == 0:
             return None
+
         dest_dir.mkdir(parents=True, exist_ok=True)
-        target = dest_dir / ready[0].name
-        shutil.move(str(ready[0]), str(target))
+        target = dest_dir / best.name
+        if best.resolve() != target.resolve():
+            shutil.move(str(best), str(target))
         return [target]
 
-    def _await_dropped_file(self, pm: PipelineMod, dest_dir: Path, why: str):
-        """The app cannot fetch this mod. Wait for the player to add the file to
-        the mod folder (or drop it loose in the root) and carry on with it."""
-        self._log(f"  {why} Save the file in {self._download_dir} and the app "
-                  f"carries on by itself.", "warning")
-        self._set_status(pm, ModStatus.DOWNLOADING, "Add the file to your Downloads folder (Settings>General)")
+    def _await_dropped_file(self, pm: PipelineMod, dest_dir: Path, why: str,
+                            started_at: float = 0):
+        """The app cannot fetch this mod directly. Wait for the player to add
+        the file to the mod folder (or drop it loose in the root or Downloads
+        folder) and carry on with it."""
+        if not self._browser_download_mode:
+            self._log(f"  {why} Save the file in {self._download_dir} and the app "
+                      f"carries on by itself.", "warning")
+            self._set_status(pm, ModStatus.DOWNLOADING, "Add the file to your Downloads folder (Settings>General)")
         seen: dict = {}
         deadline = time.monotonic() + _DROP_WAIT_SECONDS
         while time.monotonic() < deadline and not self._stop_event.is_set():
-            found = self._dropped_archive(pm, dest_dir, seen)
+            found = self._dropped_archive(pm, dest_dir, seen, started_at)
             if found:
                 return found
             self._stop_event.wait(_DROP_POLL_SECONDS)
         return None
+
+    def _resolve_browser_download_url(self, pm: PipelineMod) -> str:
+        mod = pm.build_mod
+        if mod.source_host == "nexus":
+            from scraper import nexus
+            mod_id = self._nexus_mod_id(mod)
+            if mod_id:
+                domain = nexus.GAME_DOMAIN.get(mod.game, "kotor")
+                return f"https://www.nexusmods.com/{domain}/mods/{mod_id}?tab=files"
+            if mod.url:
+                return mod.url
+            return nexus.search_url(mod.game, mod.name)
+        elif mod.source_host == "deadlystream":
+            return mod.url or mod.ds_url
+        return mod.url or ""
+
+    @staticmethod
+    def _open_in_browser(url: str) -> None:
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            try:
+                import subprocess
+                subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except Exception:
+                pass
+
+    def _download_via_browser(self, pm: PipelineMod, dest_dir: Path) -> "list[Path] | None":
+        """Guide the player to download via their web browser (Firefox, Edge, etc.)
+        and watch the Downloads folder for the resulting archive. Avoids API and
+        direct session permission issues on DeadlyStream and Nexus Mods."""
+        from scraper.build_scraper import HOST_LABELS
+        mod = pm.build_mod
+
+        cached = self._cached_for(pm, dest_dir)
+        if cached:
+            return cached
+
+        if self._browser_download_lock.locked():
+            self._set_status(pm, ModStatus.DOWNLOADING, "Waiting for previous browser download...")
+
+        with self._browser_download_lock:
+            if self._stop_event.is_set():
+                return None
+
+            cached = self._cached_for(pm, dest_dir)
+            if cached:
+                return cached
+
+            url = self._resolve_browser_download_url(pm)
+            host_label = HOST_LABELS.get(mod.source_host, mod.source_host.title())
+
+            self._log(f"  {host_label}: opening page for \"{mod.name}\" in your browser...", "warning")
+            if url:
+                self._log(f"  {url}", "muted")
+
+            keep_names = mod.directives.download_only
+            if mod.source_host == "nexus":
+                self._log(f"  On the Files tab, choose the {self._screen_resolution.replace('x', ' × ')} file when the mod offers resolution variants, then click 'Manual Download' (or 'Slow Download' for free accounts).", "warning")
+            elif mod.source_host == "deadlystream":
+                self._log(f"  Choose the {self._screen_resolution.replace('x', ' × ')} file if the download list offers resolution variants, then click 'Download this file'.", "warning")
+
+            if keep_names:
+                self._log(f"  Build guide recommendation: download only {', '.join(keep_names)}", "warning")
+
+            self._set_status(pm, ModStatus.DOWNLOADING, "Waiting for download in browser...")
+
+            started_at = time.time()
+            if url:
+                self._open_in_browser(url)
+
+            archives = self._await_dropped_file(
+                pm, dest_dir,
+                why=f"Waiting for \"{mod.name}\" to be downloaded in your browser.",
+                started_at=started_at)
+            return archives
 
     def _download_mod(self, pm: PipelineMod) -> None:
         """Download all files for a mod. Called concurrently; never raises."""
@@ -745,6 +947,8 @@ class Pipeline:
                     and not _hosts.can_download(mod.source_host):
                 from scraper.build_scraper import HOST_LABELS
                 site = HOST_LABELS.get(mod.source_host, mod.source_host)
+                if self._browser_download_mode and mod.url:
+                    self._open_in_browser(mod.url)
                 archives = self._await_dropped_file(
                     pm, dest_dir, f"The app cannot download from {site} ({mod.url}).")
                 if not archives:
@@ -779,7 +983,16 @@ class Pipeline:
             if ignore_names:
                 self._log(
                     f"  Build guide: skipping download of {', '.join(ignore_names)}.")
-            if mod.source_host == "nexus":
+            if self._browser_download_mode and mod.source_host in ("deadlystream", "nexus"):
+                archives = self._download_via_browser(pm, dest_dir)
+                if not archives:
+                    if not pm.error:
+                        pm.error = (f"Download timed out or was cancelled for {mod.name}. "
+                                    f"Save the file in your Downloads folder and retry.")
+                        self._set_status(pm, ModStatus.ERROR, pm.error)
+                        self._log(f"  {pm.error}", "error")
+                    return
+            elif mod.source_host == "nexus":
                 archives = self._download_from_nexus(
                     pm, dest_dir, dl_progress, keep_names, ignore_names)
                 if archives is None:

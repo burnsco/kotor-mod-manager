@@ -65,6 +65,7 @@ export function BuildsView(props: BuildsViewProps) {
   const [showAddBuild, setShowAddBuild] = useState(false);
   const [installError, setInstallError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
+  const [screenResolution, setScreenResolution] = useState("1920x1080");
   const visibleMods = useMemo(() => {
     const term = query.trim().toLowerCase();
     return term ? mods.filter(m => m.name.toLowerCase().includes(term)) : mods;
@@ -94,6 +95,26 @@ export function BuildsView(props: BuildsViewProps) {
 
   const labelFor = (key: string) => builds.find((b) => b.key === key)?.label ?? key;
   const patcherName = patcherMod ? mods.find((m) => m.file_id === patcherMod)?.name : null;
+
+  useEffect(() => {
+    api.getSettings().then(s => {
+      setScreenResolution(s.preferred_resolution || s.screen_resolution || "1920x1080");
+    }).catch(() => {});
+  }, []);
+
+  const chooseScreenResolution = async (resolution: string) => {
+    if (running || loading) return;
+    try {
+      const settings = await api.getSettings();
+      const { screen_resolution: _detected, ...savedSettings } = settings;
+      await api.setSettings({ ...savedSettings, preferred_resolution: resolution });
+      setScreenResolution(resolution);
+      addLog(`Screen size set to ${resolution.replace("x", " × ")}. Resolution-specific cached mods will be checked, and mismatched installs selected again.`, "success");
+      if (mods.length) await loadBuild(false);
+    } catch (e: any) {
+      addLog(`Could not save screen size: ${e?.message ?? "error"}`, "error");
+    }
+  };
 
   // Select all mods by default, but skip already-installed ones.
   useEffect(() => {
@@ -195,7 +216,6 @@ export function BuildsView(props: BuildsViewProps) {
   };
 
   const startInstall = async () => {
-    if (!loggedIn) { requestLogin(); return; }
     if (mods.length === 0) { addLog("Load a mod list first.", "warning"); return; }
     if (selectedCount === 0) { addLog(t("builds.selectNoneWarn"), "warning"); return; }
     setInstallError(null);
@@ -204,6 +224,10 @@ export function BuildsView(props: BuildsViewProps) {
       await api.startInstall(selectedBuild, undefined, fileIds);
       setRunning(true);
     } catch (e: any) {
+      if (e?.status === 401 || e?.data?.error === "Not logged in") {
+        requestLogin();
+        return;
+      }
       const err = e?.data?.error;
       if (err === "game_path_required" || err === "game_path_invalid") {
         if (err === "game_path_invalid") {
@@ -365,6 +389,22 @@ export function BuildsView(props: BuildsViewProps) {
             <Trash2 />
           </Button>
         )}
+        <div className="ml-auto flex items-center gap-1.5" role="group" aria-label={t("builds.screenSize")}>
+          <span className="mr-1 text-xs text-muted-foreground">{t("builds.screenSize")}</span>
+          {([[
+            "1920x1080", "1080p"], ["2560x1440", "2K"], ["3840x2160", "4K"]] as const).map(([resolution, label]) => (
+            <Button
+              key={resolution}
+              variant={screenResolution === resolution ? "secondary" : "outline"}
+              size="sm"
+              className="h-7 px-2.5 text-xs"
+              onClick={() => chooseScreenResolution(resolution)}
+              disabled={running || loading}
+              aria-pressed={screenResolution === resolution}
+              title={`${label} (${resolution.replace("x", " × ")})`}
+            >{label}</Button>
+          ))}
+        </div>
       </div>
 
       {mods.length > 0 && (

@@ -14,6 +14,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -86,6 +87,17 @@ def _screen_resolution() -> str:
         except Exception:
             pass
     return "1920x1080"
+
+
+def _resolution_from_name(name: str) -> tuple[int, int] | None:
+    match = re.search(r"(\d{3,4})\s*[x×]\s*(\d{3,4})", name or "", re.I)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    token = re.search(r"\b(1080p|1440p|2160p|2k|4k)\b", name or "", re.I)
+    return {
+        "1080p": (1920, 1080), "1440p": (2560, 1440),
+        "2k": (2560, 1440), "2160p": (3840, 2160), "4k": (3840, 2160),
+    }.get(token.group(1).lower()) if token else None
 
 
 def _all_builds() -> list[dict]:
@@ -250,9 +262,12 @@ def _platform_name() -> str:
 @app.get("/api/status")
 def status() -> dict:
     holo = find_system_holopatcher()
+    conf = cfg.load()
+    browser_dl = conf.get("browser_download_mode", sys.platform != "win32")
     return {
         "version": __version__,
         "logged_in": state.client._logged_in,
+        "browser_download_mode": browser_dl,
         "pipeline_running": bool(state.pipeline and state.pipeline.is_running),
         "shim_available": holo is not None,
         "shim_path": str(holo) if holo else None,
@@ -494,6 +509,8 @@ def get_settings() -> dict:
         "custom_patcher_path": conf.get("custom_patcher_path", ""),
         "nexus_api_key": conf.get("nexus_api_key", ""),
         "preferred_resolution": conf.get("preferred_resolution", ""),
+        "screen_resolution": conf.get("preferred_resolution") or _screen_resolution(),
+        "browser_download_mode": conf.get("browser_download_mode", sys.platform != "win32"),
     }
 
 
@@ -871,6 +888,7 @@ def load_build(build_key: str, profile: str = "", refresh: bool = False) -> dict
     # player already has. source_ref is the file_id set at install time.
     try:
         from installer import mod_manager as mm
+        from installer.download_paths import download_folder_name
         game = _resolve_build_game(build_key)
         scope = profile if (profile and cfg.get_profile(profile)) else game
         manifest = mm.load_manifest(scope)
@@ -878,11 +896,34 @@ def load_build(build_key: str, profile: str = "", refresh: bool = False) -> dict
     except Exception:
         installed_refs = set()
 
+    # A resolution-specific archive installed for a previous screen size is
+    # not current for this one. Let the player select and reinstall it.
+    resolution = cfg.load().get("preferred_resolution") or _screen_resolution()
+    resolution_match = re.search(r"(\d{3,4})\s*[x×]\s*(\d{3,4})", resolution or "")
+    target_resolution = (int(resolution_match.group(1)), int(resolution_match.group(2))) if resolution_match else None
+    download_root = cfg.download_dir()
+
+    def installed_for_resolution(mod) -> bool:
+        if mod.file_id not in installed_refs:
+            return False
+        folder = download_root / download_folder_name(mod.file_id, mod.slug)
+        try:
+            manifest_path = folder / ".downloads.json"
+            if manifest_path.is_file():
+                names = json.loads(manifest_path.read_text(encoding="utf-8")).get("files", [])
+            else:
+                names = [p.name for p in folder.iterdir()
+                         if p.is_file() and p.suffix.lower() in (".zip", ".7z", ".rar")]
+        except (OSError, ValueError, AttributeError):
+            return True  # Legacy installs may no longer have their download cache.
+        tagged = [found for found in (_resolution_from_name(name) for name in names) if found]
+        return not (tagged and target_resolution and target_resolution not in tagged)
+
     return {
         "ok": True,
         "build_key": build_key,
         "from_cache": from_cache,
-        "mods": [{**build_mod_to_dict(m), "installed": m.file_id in installed_refs} for m in mods],
+        "mods": [{**build_mod_to_dict(m), "installed": installed_for_resolution(m)} for m in mods],
     }
 
 
@@ -955,7 +996,9 @@ def install_start(req: StartInstallRequest) -> dict:
     mods = state.loaded_mods.get(req.build_key)
     if not mods:
         return JSONResponse(status_code=400, content={"ok": False, "error": "Load the mod list first"})
-    if not state.client._logged_in:
+    conf = cfg.load()
+    browser_dl = conf.get("browser_download_mode", sys.platform != "win32")
+    if not browser_dl and not state.client._logged_in:
         return JSONResponse(status_code=401, content={"ok": False, "error": "Not logged in"})
 
     # Honour a user selection (toggled-off mods are skipped).
@@ -1040,6 +1083,7 @@ def install_start(req: StartInstallRequest) -> dict:
         game_type=game,
         language=conf.get("language", "en"),
         screen_resolution=conf.get("preferred_resolution") or _screen_resolution(),
+        browser_download_mode=browser_dl,
     )
     state.pipeline.start()
     hub.publish({"type": "pipeline", "event": "started",

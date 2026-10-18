@@ -62,6 +62,8 @@ export interface Settings {
   custom_patcher_path: string;
   nexus_api_key: string;
   preferred_resolution: string;
+  screen_resolution?: string;
+  browser_download_mode?: boolean;
 }
 
 export interface NexusValidation {

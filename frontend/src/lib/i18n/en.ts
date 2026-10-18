@@ -41,6 +41,7 @@ export const en: Dict = {
   "builds.summary": "{count} mods · {done}/{total} installed",
   "builds.summaryErrors": "{count} mods · {done}/{total} installed · {errors} failed",
   "builds.summaryManual": "{count} mods · {done}/{total} done · {manual} need a manual step",
+  "builds.screenSize": "Screen size",
   "builds.manualNeeded": "Manual install required",
   "builds.manualInstructions": "Open the folder below and follow the readme to finish installing this mod.",
   "builds.manualOpenFolder": "Open folder",

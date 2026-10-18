@@ -1,6 +1,7 @@
 import copy
 import json
 import os
+import sys
 import uuid
 from pathlib import Path
 
@@ -12,6 +13,7 @@ DEFAULTS = {
     "kotor2_path": "",
     "download_dir": str(Path.home() / "Downloads" / "KOTOR_Mods"),
     "deadlystream_username": "",
+    "browser_download_mode": sys.platform != "win32",
     "neocities_urls": [
         "https://kotor.neocities.org/modding/mod_builds/k1/full",
         "https://kotor.neocities.org/modding/mod_builds/k1/spoiler-free",

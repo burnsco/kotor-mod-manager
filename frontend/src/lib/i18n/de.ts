@@ -41,6 +41,7 @@ export const de: Dict = {
   "builds.summary": "{count} Mods · {done}/{total} fertig",
   "builds.summaryErrors": "{count} Mods · {done}/{total} fertig · {errors} Fehler",
   "builds.summaryManual": "{count} Mods · {done}/{total} fertig · {manual} brauchen manuelle Schritte",
+  "builds.screenSize": "Bildschirmgröße",
   "builds.manualNeeded": "Braucht ein paar manuelle Schritte:",
   "builds.manualOpenFolder": "Ordner öffnen",
   "builds.manualMarkDone": "Als installiert markieren",

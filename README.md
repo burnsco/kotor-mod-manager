@@ -48,13 +48,14 @@ That is the whole app, one file. Release downloads are scanned with ClamAV befor
 publication. Each new release includes a `virus-scan.txt` report with the scanner
 version, scan results, and SHA-256 checksums for both downloads.
 
-### 2. Point it at your games and sign in
+### 2. Point it at your games and sign in to your browser
 
 Open **Settings → Game Installs** and tell it where KOTOR 1 and/or KOTOR 2 are
-installed, then sign in to your DeadlyStream account under **Account** (mods are
-downloaded from your own account). If your build includes mods from Nexus Mods,
-also paste your Nexus API key under **Settings → Nexus** (see
-[Mods hosted on Nexus Mods](#mods-hosted-on-nexus-mods)).
+installed. On Linux, the app opens DeadlyStream and Nexus Mods in your default
+browser and watches your Downloads folder, so sign in to those sites in that
+browser first. No DeadlyStream credentials or Nexus API key are needed for this
+download mode. Other platforms can enable **Download via web browser** under
+**Settings → General** to use the same flow.
 
 <a href="docs/images/05-game-installs.png"><img src="docs/images/05-game-installs.png" alt="Settings screen showing where to add your KOTOR 1 and KOTOR 2 game folders" width="100%"></a>
 
@@ -69,15 +70,18 @@ automatically, with no clicking through each one.
 
 ### Mods hosted on Nexus Mods
 
-Some mods in the builds live on Nexus Mods rather than DeadlyStream. The app
-downloads those too, using your personal API key (get one at
+Some mods in the builds live on Nexus Mods rather than DeadlyStream. In browser
+download mode, the app opens each mod's Files tab and waits for the archive to
+arrive in Downloads. On free accounts, click **Manual Download** and then
+**Slow Download** on Nexus; premium users can choose their available download
+option. Sign in to Nexus in your browser first. In direct download mode, Nexus
+uses the personal API key (get one at
 [nexusmods.com/users/myaccount?tab=api](https://www.nexusmods.com/users/myaccount?tab=api),
 under "Personal API Key", and paste it into **Settings → Nexus**).
 
-- **Premium account:** fully automatic.
-- **Free account:** one click per mod. When you press Install, the app opens
-  each Nexus mod's page in turn. Click **Mod manager download** on each one,
-  and the downloads then run by themselves.
+In browser mode, DeadlyStream also opens each mod page and waits for you to
+click its download button. Browser assisted downloads are handled one at a time
+so each archive can be matched to the correct mod.
 
 MEGA, Google Drive, GitHub and direct links download automatically. For sites
 the app can't download from (marked with a badge), download the file yourself
